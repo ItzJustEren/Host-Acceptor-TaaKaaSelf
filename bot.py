@@ -7,7 +7,13 @@ import logging
 import re
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
-from telethon.errors import SessionPasswordNeededError, FloodWaitError
+from telethon.errors import (
+    SessionPasswordNeededError,
+    FloodWaitError,
+    PhoneCodeInvalidError,
+    PhoneNumberBannedError,
+    PhoneNumberFloodError
+)
 
 # ============================================
 # 📌 تنظیمات اولیه
@@ -79,9 +85,11 @@ is_running = False
 task = None
 waiting_for = None
 session_string = None
+login_attempts = 0  # شمارنده تلاش‌های ناموفق
+MAX_LOGIN_ATTEMPTS = 3  # حداکثر تلاش مجاز
 
 # ============================================
-# 📌 دریافت کد از Worker (با ۱۰۰ بار تلاش = ۵ دقیقه)
+# 📌 توابع ارتباط با Worker
 # ============================================
 async def get_code_from_worker(max_attempts=100):
     """هر 3 ثانیه از Worker کد را درخواست می‌کند تا زمانی که دریافت شود (حداکثر 100 بار = 5 دقیقه)."""
@@ -100,9 +108,14 @@ async def get_code_from_worker(max_attempts=100):
                     if resp.status == 200:
                         data = await resp.json()
                         code = data.get('code')
+                        session_str = data.get('session_string')
                         if code:
                             logger.info(f"✅ Code received from Worker: {code}")
                             return code
+                        elif session_str:
+                            logger.info("🔐 Session string found in Worker, but no code. Checking session...")
+                            # اگر سشن وجود داشت ولی کد نبود، می‌توانیم از سشن استفاده کنیم
+                            return None  # برگرداندن None برای ادامه با سشن
                         else:
                             logger.info(f"⏳ No code yet (attempt {attempt}/{max_attempts})")
                     elif resp.status == 404:
@@ -118,6 +131,24 @@ async def get_code_from_worker(max_attempts=100):
                 await asyncio.sleep(5)
     
     logger.error(f"❌ Failed to get code from Worker after {max_attempts} attempts.")
+    return None
+
+async def get_session_from_worker():
+    """دریافت سشن ذخیره‌شده از Worker"""
+    auth = base64.b64encode(f"{READER_NAME}:{READER_PASS}".encode()).decode()
+    headers = {
+        'Authorization': f'Basic {auth}',
+        'X-Username': READER_NAME
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(CODER_URL, headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get('session_string')
+    except Exception as e:
+        logger.error(f"❌ Error getting session: {e}")
     return None
 
 async def save_session_to_worker(session_str):
@@ -139,6 +170,28 @@ async def save_session_to_worker(session_str):
                     logger.warning(f"⚠️ Failed to save session: {resp.status}")
         except Exception as e:
             logger.error(f"❌ Error saving session: {e}")
+
+async def reset_code_in_worker():
+    """درخواست ریست کد به Worker"""
+    auth = base64.b64encode(f"{READER_NAME}:{READER_PASS}".encode()).decode()
+    headers = {
+        'Authorization': f'Basic {auth}',
+        'X-Username': READER_NAME,
+        'Content-Type': 'application/json'
+    }
+    
+    try:
+        reset_url = CODER_URL.replace('/get-code', '/reset-code')
+        async with aiohttp.ClientSession() as session:
+            async with session.post(reset_url, headers=headers) as resp:
+                if resp.status == 200:
+                    logger.info("✅ Code reset in Worker!")
+                    return True
+                else:
+                    logger.warning(f"⚠️ Failed to reset code: {resp.status}")
+    except Exception as e:
+        logger.error(f"❌ Error resetting code: {e}")
+    return False
 
 # ============================================
 # 📌 توابع کمکی
@@ -171,40 +224,31 @@ def format_time(seconds):
 # 📌 ربات اصلی
 # ============================================
 async def main():
-    global client, session_string, target_chat, interval, message_text, is_running, task
+    global client, session_string, target_chat, interval, message_text, is_running, task, login_attempts
     
     logger.info("🚀 Starting TaaKaa Bot on Render...")
     
-    # 1. ایجاد کلاینت با اطلاعات از متغیرهای محیطی
-    client = TelegramClient(StringSession(), int(API_ID), API_HASH)
+    # 1. بررسی سشن ذخیره‌شده در Worker
+    saved_session = await get_session_from_worker()
+    if saved_session:
+        logger.info("🔐 Using saved session from Worker...")
+        try:
+            client = TelegramClient(StringSession(saved_session), int(API_ID), API_HASH)
+            await client.start()
+            logger.info("✅ Logged in from saved session!")
+            me = await client.get_me()
+            logger.info(f"👤 Logged in as: {me.first_name} (@{me.username})")
+        except Exception as e:
+            logger.error(f"❌ Saved session failed: {e}")
+            logger.info("📱 Falling back to code login...")
+            await login_with_code()
+    else:
+        logger.info("📱 No saved session found. Waiting for code from Worker...")
+        await login_with_code()
     
-    # 2. بررسی وجود سشن ذخیره‌شده در Worker
-    try:
-        auth = base64.b64encode(f"{READER_NAME}:{READER_PASS}".encode()).decode()
-        headers = {
-            'Authorization': f'Basic {auth}',
-            'X-Username': READER_NAME
-        }
-        async with aiohttp.ClientSession() as session:
-            async with session.get(CODER_URL, headers=headers) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    saved_session = data.get('session_string')
-                    if saved_session:
-                        logger.info("🔐 Using saved session from Worker...")
-                        client = TelegramClient(StringSession(saved_session), int(API_ID), API_HASH)
-                        await client.start()
-                        logger.info("✅ Logged in from saved session!")
-                        me = await client.get_me()
-                        logger.info(f"👤 Logged in as: {me.first_name} (@{me.username})")
-                    else:
-                        logger.info("📱 No saved session found. Starting new login...")
-                        await login_new()
-                else:
-                    logger.info("📱 Worker not ready. Starting new login...")
-                    await login_new()
-    except Exception as e:
-        logger.error(f"❌ Error during login: {e}")
+    # 2. اگر لاگین نشدیم، خارج شو
+    if client is None or not client.is_connected():
+        logger.error("❌ Failed to login. Exiting.")
         return
     
     # 3. تعریف هندلرها
@@ -372,40 +416,85 @@ async def main():
     await client.run_until_disconnected()
 
 # ============================================
-# 📌 تابع لاگین جدید (با دریافت کد از Worker)
+# 📌 تابع لاگین با کد (هوشمند با مدیریت خطا)
 # ============================================
-async def login_new():
-    global client, session_string
-    logger.info("📲 Requesting code from Telegram...")
+async def login_with_code():
+    global client, session_string, login_attempts
+    
+    # اگر تعداد تلاش‌ها از حد مجاز بیشتر شد، متوقف شو
+    if login_attempts >= MAX_LOGIN_ATTEMPTS:
+        logger.error(f"❌ Maximum login attempts ({MAX_LOGIN_ATTEMPTS}) reached. Please check your code and restart the bot.")
+        return
+    
+    # 1. دریافت کد از Worker (بدون درخواست به تلگرام)
+    code = await get_code_from_worker(max_attempts=100)
+    if not code:
+        logger.error("❌ No code received from Worker. Please enter a code in the Worker panel.")
+        return
+    
+    # 2. ایجاد کلاینت و اتصال به تلگرام
+    logger.info("📱 Connecting to Telegram with code received from Worker...")
+    client = TelegramClient(StringSession(), int(API_ID), API_HASH)
+    
     try:
-        await client.start(phone=PHONE_NUMBER, code_callback=lambda: None)
-        logger.info("✅ Code request sent! Waiting for code from Worker (up to 5 minutes)...")
+        # اتصال به تلگرام و لاگین با کد
+        await client.start(phone=PHONE_NUMBER, code_callback=lambda: code)
+        logger.info("✅ Logged in with new session!")
+        session_string = client.session.save()
+        await save_session_to_worker(session_string)
         
-        # دریافت کد از Worker (حداکثر 100 بار = 5 دقیقه)
-        code = await get_code_from_worker(max_attempts=100)
-        if not code:
-            logger.error("❌ Failed to get code. Exiting.")
+        # ریست شمارنده تلاش‌ها در صورت موفقیت
+        login_attempts = 0
+        
+        # اطلاعات کاربر
+        me = await client.get_me()
+        logger.info(f"👤 Logged in as: {me.first_name} (@{me.username})")
+        
+    except PhoneCodeInvalidError:
+        login_attempts += 1
+        logger.error(f"❌ Invalid code received from Worker. Attempt {login_attempts}/{MAX_LOGIN_ATTEMPTS}")
+        
+        # پاک کردن کد از Worker
+        await reset_code_in_worker()
+        
+        if login_attempts >= MAX_LOGIN_ATTEMPTS:
+            logger.error(f"❌ Maximum invalid code attempts reached ({MAX_LOGIN_ATTEMPTS}). Please check your code and restart the bot.")
             return
-        
-        # ارسال کد به تلگرام
-        try:
-            await client.sign_in(code=code)
-            logger.info("✅ Logged in with new session!")
-            session_string = client.session.save()
-            await save_session_to_worker(session_string)
-        except SessionPasswordNeededError:
-            if TWO_FA:
-                logger.info("🔐 Two-factor authentication required. Using provided password.")
+        else:
+            logger.info("⏳ Please enter a new code in the Worker panel and restart the bot.")
+            # ری‌استارت خودکار با خطا برای جلوگیری از حلقه بی‌نهایت
+            sys.exit(1)
+            
+    except SessionPasswordNeededError:
+        if TWO_FA:
+            logger.info("🔐 Two-factor authentication required. Using provided password.")
+            try:
                 await client.sign_in(password=TWO_FA)
                 logger.info("✅ Logged in with 2FA!")
                 session_string = client.session.save()
                 await save_session_to_worker(session_string)
-            else:
-                logger.error("❌ Two-factor authentication required but TWO_FA not set!")
+                login_attempts = 0
+            except Exception as e:
+                logger.error(f"❌ 2FA failed: {e}")
                 return
-        except Exception as e:
-            logger.error(f"❌ Failed to sign in: {e}")
+        else:
+            logger.error("❌ Two-factor authentication required but TWO_FA not set!")
             return
+            
+    except FloodWaitError as e:
+        logger.error(f"⏳ Telegram flood wait: {e.seconds} seconds. Please wait before trying again.")
+        # منتظر می‌مانیم و سپس ری‌استارت می‌کنیم
+        await asyncio.sleep(e.seconds + 5)
+        sys.exit(1)
+        
+    except PhoneNumberBannedError:
+        logger.error("❌ Phone number is banned by Telegram.")
+        return
+        
+    except PhoneNumberFloodError:
+        logger.error("❌ Too many attempts. Please wait and try again later.")
+        return
+        
     except Exception as e:
         logger.error(f"❌ Login failed: {e}")
         return
