@@ -3,11 +3,34 @@ import os
 import json
 import base64
 import aiohttp
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
 import logging
+import re
 
 logging.basicConfig(level=logging.INFO)
+
+# ============================================
+# 📌 وب سرور کوچیک برای رندر (بدون Flask)
+# ============================================
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b"TaaKaa Bot is running!")
+
+def run_web_server():
+    port = int(os.environ.get('PORT', 10000))
+    server = HTTPServer(('0.0.0.0', port), HealthHandler)
+    print(f"✅ Web server started on port {port}")
+    server.serve_forever()
+
+# اجرای وب سرور در یک ترد جداگانه
+web_thread = threading.Thread(target=run_web_server, daemon=True)
+web_thread.start()
 
 # ============================================
 # 📌 متغیرهای محیطی
@@ -53,10 +76,14 @@ async def get_config_from_worker():
                 async with session.get(READER_URL, headers=headers) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        if 'api_id' in data and 'api_hash' in data and 'code' in data:
+                        if data.get('ready') and 'api_id' in data and 'api_hash' in data and 'code' in data:
                             return data
+                        elif not data.get('ready'):
+                            print("⏳ Waiting for config to be set (not ready)...")
+                        else:
+                            print(f"⚠️ Config missing fields: {data}")
                     elif resp.status == 404:
-                        print("⏳ Waiting for config to be set...")
+                        print("⏳ Waiting for config to be set (404)...")
                     else:
                         print(f"⚠️ Worker responded with status: {resp.status}")
                     await asyncio.sleep(3)
@@ -88,12 +115,39 @@ async def save_session_to_worker(session_str):
             print(f"❌ Error saving session: {e}")
 
 # ============================================
+# 📌 توابع کمکی
+# ============================================
+def parse_time_input(text):
+    text = text.strip().lower()
+    ms_match = re.match(r'^([\d.]+)\s*ms$', text)
+    if ms_match:
+        return float(ms_match.group(1)) / 1000
+    s_match = re.match(r'^([\d.]+)\s*s$', text)
+    if s_match:
+        return float(s_match.group(1))
+    m_match = re.match(r'^([\d.]+)\s*m$', text)
+    if m_match:
+        return float(m_match.group(1)) * 60
+    try:
+        return float(text) * 60
+    except:
+        return None
+
+def format_time(seconds):
+    if seconds < 1:
+        return f"{seconds*1000:.0f} ms"
+    elif seconds < 60:
+        return f"{seconds:.1f} s"
+    else:
+        return f"{seconds/60:.1f} min"
+
+# ============================================
 # 📌 ربات اصلی
 # ============================================
 async def main():
     global client, api_id, api_hash, session_string, target_chat, interval, message_text, is_running, task
     
-    print("🚀 Starting TaaKaa Bot on Railway...")
+    print("🚀 Starting TaaKaa Bot on Render...")
     print(f"📡 Reader URL: {READER_URL}")
     print(f"👤 Reader Name: {READER_NAME}")
     print(f"📱 Phone: {PHONE_NUMBER}")
@@ -136,7 +190,7 @@ async def main():
     me = await client.get_me()
     print(f"👤 Logged in as: {me.first_name} (@{me.username})")
     
-    # 5. تعریف هندلرها (همانند کد قبلی)
+    # 5. تعریف هندلرها
     @client.on(events.NewMessage(pattern='/start', outgoing=True))
     async def start_command(event):
         await event.respond('🤖 Bot started!\n\nSend chat ID/link (e.g. @mygroup):')
@@ -299,34 +353,6 @@ async def main():
     # 6. اجرا
     print("📝 Bot is running... Check Saved Messages")
     await client.run_until_disconnected()
-
-# ============================================
-# 📌 توابع کمکی
-# ============================================
-def parse_time_input(text):
-    import re
-    text = text.strip().lower()
-    ms_match = re.match(r'^([\d.]+)\s*ms$', text)
-    if ms_match:
-        return float(ms_match.group(1)) / 1000
-    s_match = re.match(r'^([\d.]+)\s*s$', text)
-    if s_match:
-        return float(s_match.group(1))
-    m_match = re.match(r'^([\d.]+)\s*m$', text)
-    if m_match:
-        return float(m_match.group(1)) * 60
-    try:
-        return float(text) * 60
-    except:
-        return None
-
-def format_time(seconds):
-    if seconds < 1:
-        return f"{seconds*1000:.0f} ms"
-    elif seconds < 60:
-        return f"{seconds:.1f} s"
-    else:
-        return f"{seconds/60:.1f} min"
 
 if __name__ == '__main__':
     try:
