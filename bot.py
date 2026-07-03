@@ -31,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================
-# 📌 وب سرور آسنکرون (برای Render)
+# 📌 وب سرور آسنکرون
 # ============================================
 async def run_web_server():
     port = int(os.environ.get('PORT', 10000))
@@ -62,7 +62,7 @@ PHONE_NUMBER = os.environ.get('PHONE_NUMBER')
 CODER_URL = os.environ.get('CODER_URL')
 READER_NAME = os.environ.get('READER_NAME')
 READER_PASS = os.environ.get('READER_PASS')
-TWO_FA = os.environ.get('TWO_FA')  # اختیاری
+TWO_FA = os.environ.get('TWO_FA')
 
 if not all([API_ID, API_HASH, PHONE_NUMBER, CODER_URL, READER_NAME, READER_PASS]):
     logger.error("❌ All required environment variables must be set!")
@@ -92,7 +92,6 @@ MAX_LOGIN_ATTEMPTS = 3
 # 📌 توابع ارتباط با Worker
 # ============================================
 async def get_code_from_worker(max_attempts=100):
-    """هر 3 ثانیه از Worker کد را درخواست می‌کند تا زمانی که دریافت شود (حداکثر 100 بار = 5 دقیقه)."""
     auth = base64.b64encode(f"{READER_NAME}:{READER_PASS}".encode()).decode()
     headers = {
         'Authorization': f'Basic {auth}',
@@ -129,7 +128,6 @@ async def get_code_from_worker(max_attempts=100):
     return None
 
 async def save_session_to_worker(session_str):
-    """ذخیره سشن در Worker"""
     auth = base64.b64encode(f"{READER_NAME}:{READER_PASS}".encode()).decode()
     headers = {
         'Authorization': f'Basic {auth}',
@@ -149,7 +147,6 @@ async def save_session_to_worker(session_str):
             logger.error(f"❌ Error saving session: {e}")
 
 async def reset_code_in_worker():
-    """درخواست ریست کد به Worker"""
     auth = base64.b64encode(f"{READER_NAME}:{READER_PASS}".encode()).decode()
     headers = {
         'Authorization': f'Basic {auth}',
@@ -239,7 +236,7 @@ async def main():
         logger.error("❌ Failed to login. Exiting.")
         return
     
-    # 3. تعریف هندلرها
+    # 3. تعریف هندلرها (همان کد قبلی)
     @client.on(events.NewMessage(pattern='/start', outgoing=True))
     async def start_command(event):
         await event.respond('🤖 Bot started!\n\nSend chat ID/link (e.g. @mygroup):')
@@ -404,33 +401,40 @@ async def main():
     await client.run_until_disconnected()
 
 # ============================================
-# 📌 تابع لاگین (با درخواست کد از تلگرام، سپس دریافت از Worker)
+# 📌 تابع لاگین (با درخواست کد دستی از تلگرام)
 # ============================================
 async def login_with_code():
     global client, session_string, login_attempts
     
-    # 1. ایجاد کلاینت و درخواست کد از تلگرام
-    logger.info("📱 Requesting code from Telegram...")
+    # 1. ایجاد کلاینت و اتصال به تلگرام
     client = TelegramClient(StringSession(), int(API_ID), API_HASH)
+    await client.connect()
+    
+    if not client.is_connected():
+        logger.error("❌ Failed to connect to Telegram.")
+        return
+    
+    logger.info("📱 Connected to Telegram. Requesting code...")
     
     try:
-        # این خط باعث میشه تلگرام کد رو به شماره شما بفرسته
-        await client.start(phone=PHONE_NUMBER, code_callback=lambda: None)
-        logger.info("✅ Code sent by Telegram! Waiting for you to enter it in Worker panel...")
+        # 2. درخواست کد از تلگرام (دستی)
+        await client.send_code_request(PHONE_NUMBER)
+        logger.info("✅ Code sent by Telegram! Check your phone or Telegram app.")
+        logger.info("⏳ Now waiting for you to enter the code in Worker panel...")
         
-        # 2. حالا منتظر بمون تا کد رو توی Worker ثبت کنی
+        # 3. منتظر بمون تا کد توی Worker ثبت بشه
         code = await get_code_from_worker(max_attempts=100)
         if not code:
             logger.error("❌ No code received from Worker after 5 minutes. Exiting.")
             return
         
-        # 3. کد رو به تلگرام بفرست
+        # 4. کد رو به تلگرام بفرست
         try:
-            await client.sign_in(code=code)
+            await client.sign_in(PHONE_NUMBER, code)
             logger.info("✅ Logged in with new session!")
             session_string = client.session.save()
             await save_session_to_worker(session_string)
-            login_attempts = 0  # ریست شمارنده در صورت موفقیت
+            login_attempts = 0
             
             me = await client.get_me()
             logger.info(f"👤 Logged in as: {me.first_name} (@{me.username})")
@@ -442,7 +446,7 @@ async def login_with_code():
             
             if login_attempts >= MAX_LOGIN_ATTEMPTS:
                 logger.error("❌ Too many invalid attempts. Exiting.")
-                return
+                sys.exit(1)
             else:
                 logger.info("⏳ Please enter a new code in Worker and restart the bot.")
                 sys.exit(1)
@@ -458,13 +462,10 @@ async def login_with_code():
                 logger.error("❌ 2FA required but TWO_FA not set!")
                 return
                 
-        except FloodWaitError as e:
-            logger.error(f"⏳ Flood wait: {e.seconds} seconds. Please wait and try again.")
-            return
-            
     except FloodWaitError as e:
-        logger.error(f"⏳ Telegram flood wait: {e.seconds} seconds. Please wait before trying again.")
-        return
+        logger.error(f"⏳ Flood wait: {e.seconds} seconds. Please wait and try again.")
+        await asyncio.sleep(e.seconds + 5)
+        sys.exit(1)
     except Exception as e:
         logger.error(f"❌ Login failed: {e}")
         return
