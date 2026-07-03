@@ -7,11 +7,15 @@ import logging
 import re
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
+from telethon.errors import SessionPasswordNeededError, FloodWaitError
 
 # ============================================
-# 📌 حل مشکل بافرینگ خروجی در Render
+# 📌 تنظیمات اولیه
 # ============================================
-sys.stdout.reconfigure(line_buffering=True)
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except AttributeError:
+    pass
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,7 +25,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================
-# 📌 وب سرور آسنکرون برای Render
+# 📌 وب سرور آسنکرون (برای Render)
 # ============================================
 async def run_web_server():
     port = int(os.environ.get('PORT', 10000))
@@ -29,7 +33,7 @@ async def run_web_server():
     
     async def handler(reader, writer):
         try:
-            request = await reader.read(1024)
+            await reader.read(1024)
             response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nTaaKaa Bot is running!"
             writer.write(response)
             await writer.drain()
@@ -44,21 +48,25 @@ async def run_web_server():
         await server.serve_forever()
 
 # ============================================
-# 📌 متغیرهای محیطی
+# 📌 متغیرهای محیطی (جدید)
 # ============================================
-READER_URL = os.environ.get('READER_URL', '')
-READER_NAME = os.environ.get('READER_NAME', '')
-READER_PASS = os.environ.get('READER_PASS', '')
-PHONE_NUMBER = os.environ.get('PHONE_NUMBER', '')
+API_ID = os.environ.get('API_ID')
+API_HASH = os.environ.get('API_HASH')
+PHONE_NUMBER = os.environ.get('PHONE_NUMBER')
+CODER_URL = os.environ.get('CODER_URL')
+READER_NAME = os.environ.get('READER_NAME')
+READER_PASS = os.environ.get('READER_PASS')
+TWO_FA = os.environ.get('TWO_FA')  # اختیاری
 
-if not all([READER_URL, READER_NAME, READER_PASS, PHONE_NUMBER]):
-    logger.error("❌ All environment variables must be set!")
-    logger.error("   READER_URL, READER_NAME, READER_PASS, PHONE_NUMBER")
+if not all([API_ID, API_HASH, PHONE_NUMBER, CODER_URL, READER_NAME, READER_PASS]):
+    logger.error("❌ All required environment variables must be set!")
+    logger.error("   API_ID, API_HASH, PHONE_NUMBER, CODER_URL, READER_NAME, READER_PASS")
     sys.exit(1)
 
-logger.info(f"📡 READER_URL: {READER_URL}")
-logger.info(f"👤 READER_NAME: {READER_NAME}")
 logger.info(f"📱 PHONE_NUMBER: {PHONE_NUMBER}")
+logger.info(f"🔗 CODER_URL: {CODER_URL}")
+logger.info(f"👤 READER_NAME: {READER_NAME}")
+logger.info("🔐 TWO_FA: " + ("✅ Set" if TWO_FA else "❌ Not set (optional)"))
 
 # ============================================
 # 📌 متغیرهای ربات
@@ -70,46 +78,48 @@ message_text = 'Hello from TaaKaa!'
 is_running = False
 task = None
 waiting_for = None
-api_id = None
-api_hash = None
 session_string = None
 
 # ============================================
-# 📌 دریافت تنظیمات از Worker
+# 📌 دریافت کد از Worker (فقط کد)
 # ============================================
-async def get_config_from_worker():
-    """هر 3 ثانیه از Worker اطلاعات می‌خواند تا زمانی که کامل شود."""
+async def get_code_from_worker():
+    """هر 3 ثانیه از Worker کد را درخواست می‌کند تا زمانی که دریافت شود."""
     auth = base64.b64encode(f"{READER_NAME}:{READER_PASS}".encode()).decode()
     headers = {
         'Authorization': f'Basic {auth}',
         'X-Username': READER_NAME
     }
     
+    attempt = 0
+    max_attempts = 20
     async with aiohttp.ClientSession() as session:
-        while True:
+        while attempt < max_attempts:
+            attempt += 1
             try:
-                logger.info(f"⏳ Fetching config from Worker...")
-                async with session.get(READER_URL, headers=headers) as resp:
+                async with session.get(CODER_URL, headers=headers) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        if data.get('ready') and 'api_id' in data and 'api_hash' in data and 'code' in data:
-                            logger.info("✅ Config received successfully!")
-                            return data
-                        elif not data.get('ready'):
-                            logger.info("⏳ Config not ready yet...")
+                        code = data.get('code')
+                        if code:
+                            logger.info(f"✅ Code received from Worker: {code}")
+                            return code
                         else:
-                            logger.warning(f"⚠️ Config missing fields: {data}")
+                            logger.info(f"⏳ No code yet (attempt {attempt}/{max_attempts})")
                     elif resp.status == 404:
-                        logger.info("⏳ Config not found (404), waiting...")
+                        logger.info(f"⏳ Worker not ready (404) (attempt {attempt}/{max_attempts})")
                     else:
                         logger.warning(f"⚠️ Worker responded with status: {resp.status}")
                     await asyncio.sleep(3)
             except aiohttp.ClientError as e:
-                logger.error(f"❌ Network error reading from Worker: {e}")
+                logger.error(f"❌ Network error: {e}")
                 await asyncio.sleep(5)
             except Exception as e:
                 logger.error(f"❌ Unexpected error: {e}")
                 await asyncio.sleep(5)
+    
+    logger.error("❌ Failed to get code from Worker after maximum attempts.")
+    return None
 
 async def save_session_to_worker(session_str):
     """ذخیره سشن در Worker"""
@@ -122,8 +132,7 @@ async def save_session_to_worker(session_str):
     
     async with aiohttp.ClientSession() as session:
         try:
-            save_url = READER_URL.replace('/get-config', '/save-session')
-            logger.info(f"💾 Saving session to: {save_url}")
+            save_url = CODER_URL.replace('/get-code', '/save-session')
             async with session.post(save_url, headers=headers, json={'session_string': session_str}) as resp:
                 if resp.status == 200:
                     logger.info("✅ Session saved to Worker!")
@@ -163,49 +172,45 @@ def format_time(seconds):
 # 📌 ربات اصلی
 # ============================================
 async def main():
-    global client, api_id, api_hash, session_string, target_chat, interval, message_text, is_running, task
+    global client, session_string, target_chat, interval, message_text, is_running, task
     
     logger.info("🚀 Starting TaaKaa Bot on Render...")
     
-    # 1. دریافت تنظیمات از Worker
-    config = await get_config_from_worker()
-    api_id = int(config['api_id'])
-    api_hash = config['api_hash']
-    code = config['code']
-    phone = config.get('phone_number', PHONE_NUMBER)
-    saved_session = config.get('session_string')
+    # 1. ایجاد کلاینت با اطلاعات از متغیرهای محیطی
+    client = TelegramClient(StringSession(), int(API_ID), API_HASH)
     
-    logger.info(f"✅ Config received! API_ID: {api_id}")
-    
-    # 2. ایجاد کلاینت
-    if saved_session:
-        logger.info("🔐 Using saved session...")
-        client = TelegramClient(StringSession(saved_session), api_id, api_hash)
-    else:
-        logger.info("📱 Creating new session...")
-        client = TelegramClient(StringSession(), api_id, api_hash)
-    
-    # 3. لاگین
+    # 2. لاگین (ابتدا سشن را بررسی کن)
     try:
-        if saved_session:
-            await client.start()
-            logger.info("✅ Logged in from saved session!")
-        else:
-            await client.start(phone=phone, code_callback=lambda: code)
-            logger.info("✅ Logged in with new session!")
-            
-            # ذخیره سشن
-            session_string = client.session.save()
-            await save_session_to_worker(session_string)
+        # بررسی وجود سشن ذخیره‌شده در Worker
+        auth = base64.b64encode(f"{READER_NAME}:{READER_PASS}".encode()).decode()
+        headers = {
+            'Authorization': f'Basic {auth}',
+            'X-Username': READER_NAME
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.get(CODER_URL, headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    saved_session = data.get('session_string')
+                    if saved_session:
+                        logger.info("🔐 Using saved session from Worker...")
+                        client = TelegramClient(StringSession(saved_session), int(API_ID), API_HASH)
+                        await client.start()
+                        logger.info("✅ Logged in from saved session!")
+                        me = await client.get_me()
+                        logger.info(f"👤 Logged in as: {me.first_name} (@{me.username})")
+                        # ادامه به بخش هندلرها
+                    else:
+                        logger.info("📱 No saved session found. Starting new login...")
+                        await login_new()
+                else:
+                    logger.info("📱 Worker not ready. Starting new login...")
+                    await login_new()
     except Exception as e:
-        logger.error(f"❌ Login failed: {e}")
+        logger.error(f"❌ Error during login: {e}")
         return
     
-    # 4. اطلاعات کاربر
-    me = await client.get_me()
-    logger.info(f"👤 Logged in as: {me.first_name} (@{me.username})")
-    
-    # 5. تعریف هندلرها
+    # 3. ادامه: تعریف هندلرها (همان کد قبلی)
     @client.on(events.NewMessage(pattern='/start', outgoing=True))
     async def start_command(event):
         await event.respond('🤖 Bot started!\n\nSend chat ID/link (e.g. @mygroup):')
@@ -278,7 +283,6 @@ async def main():
         if not msg:
             return
         
-        # حالت انتظار
         if waiting_for == "timer":
             seconds = parse_time_input(msg)
             if seconds is not None and seconds > 0:
@@ -308,7 +312,6 @@ async def main():
         if msg.startswith('/'):
             return
         
-        # مرحله‌های /start
         if target_chat is None:
             try:
                 chat = await client.get_entity(msg)
@@ -354,6 +357,9 @@ async def main():
                 if target_chat:
                     await client.send_message(target_chat, message_text)
                     logger.info(f'✅ Message sent to {target_chat.title}')
+            except FloodWaitError as e:
+                logger.warning(f"⏳ Flood wait: {e.seconds} seconds. Increasing interval...")
+                interval = e.seconds + 5
             except Exception as e:
                 logger.error(f'❌ Error sending message: {e}')
             
@@ -365,9 +371,47 @@ async def main():
             else:
                 await asyncio.sleep(interval)
     
-    # 6. اجرا
     logger.info("📝 Bot is running... Check Saved Messages")
     await client.run_until_disconnected()
+
+# ============================================
+# 📌 تابع لاگین جدید (با دریافت کد از Worker)
+# ============================================
+async def login_new():
+    global client, session_string
+    logger.info("📲 Requesting code from Telegram...")
+    try:
+        await client.start(phone=PHONE_NUMBER, code_callback=lambda: None)
+        logger.info("✅ Code request sent! Waiting for code from Worker...")
+        
+        # دریافت کد از Worker
+        code = await get_code_from_worker()
+        if not code:
+            logger.error("❌ Failed to get code. Exiting.")
+            return
+        
+        # ارسال کد به تلگرام
+        try:
+            await client.sign_in(code=code)
+            logger.info("✅ Logged in with new session!")
+            session_string = client.session.save()
+            await save_session_to_worker(session_string)
+        except SessionPasswordNeededError:
+            if TWO_FA:
+                logger.info("🔐 Two-factor authentication required. Using provided password.")
+                await client.sign_in(password=TWO_FA)
+                logger.info("✅ Logged in with 2FA!")
+                session_string = client.session.save()
+                await save_session_to_worker(session_string)
+            else:
+                logger.error("❌ Two-factor authentication required but TWO_FA not set!")
+                return
+        except Exception as e:
+            logger.error(f"❌ Failed to sign in: {e}")
+            return
+    except Exception as e:
+        logger.error(f"❌ Login failed: {e}")
+        return
 
 # ============================================
 # 📌 اجرای همزمان وب سرور و ربات
