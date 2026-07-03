@@ -28,10 +28,6 @@ def run_web_server():
     print(f"✅ Web server started on port {port}")
     server.serve_forever()
 
-# اجرای وب سرور در یک ترد جداگانه
-web_thread = threading.Thread(target=run_web_server, daemon=True)
-web_thread.start()
-
 # ============================================
 # 📌 متغیرهای محیطی
 # ============================================
@@ -140,6 +136,12 @@ def format_time(seconds):
         return f"{seconds:.1f} s"
     else:
         return f"{seconds/60:.1f} min"
+
+# ============================================
+# 📌 اجرای وب سرور در ترد جداگانه
+# ============================================
+web_thread = threading.Thread(target=run_web_server, daemon=True)
+web_thread.start()
 
 # ============================================
 # 📌 ربات اصلی
@@ -354,7 +356,11 @@ async def main():
     print("📝 Bot is running... Check Saved Messages")
     await client.run_until_disconnected()
 
+# ============================================
+# 📌 اجرای اصلی
+# ============================================
 if __name__ == '__main__':
+    print("🔥 Starting main function...")
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
