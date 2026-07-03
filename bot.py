@@ -186,7 +186,7 @@ async def main():
     me = await client.get_me()
     print(f"👤 Logged in as: {me.first_name} (@{me.username})")
     
-    # 5. تعریف هندلرها (دقیقاً مشابه کد قبلی شما)
+    # 5. تعریف هندلرها
     @client.on(events.NewMessage(pattern='/start', outgoing=True))
     async def start_command(event):
         await event.respond('🤖 Bot started!\n\nSend chat ID/link (e.g. @mygroup):')
