@@ -1,10 +1,7 @@
 import asyncio
 import os
-import json
 import base64
 import aiohttp
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
 import logging
@@ -13,20 +10,23 @@ import re
 logging.basicConfig(level=logging.INFO)
 
 # ============================================
-# 📌 وب سرور کوچیک برای رندر (بدون Flask)
+# 📌 وب سرور آسنکرون برای رندر
 # ============================================
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(b"TaaKaa Bot is running!")
-
-def run_web_server():
+async def run_web_server():
     port = int(os.environ.get('PORT', 10000))
-    server = HTTPServer(('0.0.0.0', port), HealthHandler)
-    print(f"✅ Web server started on port {port}")
-    server.serve_forever()
+    print(f"✅ Starting async web server on port {port}")
+    
+    async def handler(reader, writer):
+        data = await reader.read(1024)
+        response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nTaaKaa Bot is running!"
+        writer.write(response)
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+    
+    server = await asyncio.start_server(handler, '0.0.0.0', port)
+    async with server:
+        await server.serve_forever()
 
 # ============================================
 # 📌 متغیرهای محیطی
@@ -138,12 +138,6 @@ def format_time(seconds):
         return f"{seconds/60:.1f} min"
 
 # ============================================
-# 📌 اجرای وب سرور در ترد جداگانه
-# ============================================
-web_thread = threading.Thread(target=run_web_server, daemon=True)
-web_thread.start()
-
-# ============================================
 # 📌 ربات اصلی
 # ============================================
 async def main():
@@ -192,7 +186,7 @@ async def main():
     me = await client.get_me()
     print(f"👤 Logged in as: {me.first_name} (@{me.username})")
     
-    # 5. تعریف هندلرها
+    # 5. تعریف هندلرها (دقیقاً مشابه کد قبلی شما)
     @client.on(events.NewMessage(pattern='/start', outgoing=True))
     async def start_command(event):
         await event.respond('🤖 Bot started!\n\nSend chat ID/link (e.g. @mygroup):')
@@ -357,12 +351,18 @@ async def main():
     await client.run_until_disconnected()
 
 # ============================================
-# 📌 اجرای اصلی
+# 📌 اجرای همزمان وب سرور و ربات
 # ============================================
+async def main_with_server():
+    await asyncio.gather(
+        run_web_server(),
+        main()
+    )
+
 if __name__ == '__main__':
     print("🔥 Starting main function...")
     try:
-        asyncio.run(main())
+        asyncio.run(main_with_server())
     except KeyboardInterrupt:
         print("👋 Goodbye!")
     except Exception as e:
