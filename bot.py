@@ -1,28 +1,43 @@
 import asyncio
 import os
+import sys
 import base64
 import aiohttp
-from telethon import TelegramClient, events, Button
-from telethon.sessions import StringSession
 import logging
 import re
-
-logging.basicConfig(level=logging.INFO)
+from telethon import TelegramClient, events, Button
+from telethon.sessions import StringSession
 
 # ============================================
-# 📌 وب سرور آسنکرون برای رندر
+# 📌 حل مشکل بافرینگ خروجی در Render
+# ============================================
+sys.stdout.reconfigure(line_buffering=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
+
+# ============================================
+# 📌 وب سرور آسنکرون برای Render
 # ============================================
 async def run_web_server():
     port = int(os.environ.get('PORT', 10000))
-    print(f"✅ Starting async web server on port {port}")
+    logger.info(f"✅ Starting async web server on port {port}")
     
     async def handler(reader, writer):
-        data = await reader.read(1024)
-        response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nTaaKaa Bot is running!"
-        writer.write(response)
-        await writer.drain()
-        writer.close()
-        await writer.wait_closed()
+        try:
+            request = await reader.read(1024)
+            response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nTaaKaa Bot is running!"
+            writer.write(response)
+            await writer.drain()
+        except Exception as e:
+            logger.error(f"Web server error: {e}")
+        finally:
+            writer.close()
+            await writer.wait_closed()
     
     server = await asyncio.start_server(handler, '0.0.0.0', port)
     async with server:
@@ -36,10 +51,14 @@ READER_NAME = os.environ.get('READER_NAME', '')
 READER_PASS = os.environ.get('READER_PASS', '')
 PHONE_NUMBER = os.environ.get('PHONE_NUMBER', '')
 
-if not READER_URL or not READER_NAME or not READER_PASS or not PHONE_NUMBER:
-    print("❌ Error: All environment variables must be set!")
-    print("   READER_URL, READER_NAME, READER_PASS, PHONE_NUMBER")
-    exit(1)
+if not all([READER_URL, READER_NAME, READER_PASS, PHONE_NUMBER]):
+    logger.error("❌ All environment variables must be set!")
+    logger.error("   READER_URL, READER_NAME, READER_PASS, PHONE_NUMBER")
+    sys.exit(1)
+
+logger.info(f"📡 READER_URL: {READER_URL}")
+logger.info(f"👤 READER_NAME: {READER_NAME}")
+logger.info(f"📱 PHONE_NUMBER: {PHONE_NUMBER}")
 
 # ============================================
 # 📌 متغیرهای ربات
@@ -69,22 +88,27 @@ async def get_config_from_worker():
     async with aiohttp.ClientSession() as session:
         while True:
             try:
+                logger.info(f"⏳ Fetching config from Worker...")
                 async with session.get(READER_URL, headers=headers) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         if data.get('ready') and 'api_id' in data and 'api_hash' in data and 'code' in data:
+                            logger.info("✅ Config received successfully!")
                             return data
                         elif not data.get('ready'):
-                            print("⏳ Waiting for config to be set (not ready)...")
+                            logger.info("⏳ Config not ready yet...")
                         else:
-                            print(f"⚠️ Config missing fields: {data}")
+                            logger.warning(f"⚠️ Config missing fields: {data}")
                     elif resp.status == 404:
-                        print("⏳ Waiting for config to be set (404)...")
+                        logger.info("⏳ Config not found (404), waiting...")
                     else:
-                        print(f"⚠️ Worker responded with status: {resp.status}")
+                        logger.warning(f"⚠️ Worker responded with status: {resp.status}")
                     await asyncio.sleep(3)
+            except aiohttp.ClientError as e:
+                logger.error(f"❌ Network error reading from Worker: {e}")
+                await asyncio.sleep(5)
             except Exception as e:
-                print(f"❌ Error reading from Worker: {e}")
+                logger.error(f"❌ Unexpected error: {e}")
                 await asyncio.sleep(5)
 
 async def save_session_to_worker(session_str):
@@ -98,17 +122,15 @@ async def save_session_to_worker(session_str):
     
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.post(
-                READER_URL.replace('/get-config', '/save-session'),
-                headers=headers,
-                json={'session_string': session_str}
-            ) as resp:
+            save_url = READER_URL.replace('/get-config', '/save-session')
+            logger.info(f"💾 Saving session to: {save_url}")
+            async with session.post(save_url, headers=headers, json={'session_string': session_str}) as resp:
                 if resp.status == 200:
-                    print("✅ Session saved to Worker!")
+                    logger.info("✅ Session saved to Worker!")
                 else:
-                    print(f"⚠️ Failed to save session: {resp.status}")
+                    logger.warning(f"⚠️ Failed to save session: {resp.status}")
         except Exception as e:
-            print(f"❌ Error saving session: {e}")
+            logger.error(f"❌ Error saving session: {e}")
 
 # ============================================
 # 📌 توابع کمکی
@@ -143,10 +165,7 @@ def format_time(seconds):
 async def main():
     global client, api_id, api_hash, session_string, target_chat, interval, message_text, is_running, task
     
-    print("🚀 Starting TaaKaa Bot on Render...")
-    print(f"📡 Reader URL: {READER_URL}")
-    print(f"👤 Reader Name: {READER_NAME}")
-    print(f"📱 Phone: {PHONE_NUMBER}")
+    logger.info("🚀 Starting TaaKaa Bot on Render...")
     
     # 1. دریافت تنظیمات از Worker
     config = await get_config_from_worker()
@@ -156,35 +175,35 @@ async def main():
     phone = config.get('phone_number', PHONE_NUMBER)
     saved_session = config.get('session_string')
     
-    print(f"✅ Config received! API_ID: {api_id}")
+    logger.info(f"✅ Config received! API_ID: {api_id}")
     
     # 2. ایجاد کلاینت
     if saved_session:
-        print("🔐 Using saved session...")
+        logger.info("🔐 Using saved session...")
         client = TelegramClient(StringSession(saved_session), api_id, api_hash)
     else:
-        print("📱 Creating new session...")
+        logger.info("📱 Creating new session...")
         client = TelegramClient(StringSession(), api_id, api_hash)
     
     # 3. لاگین
     try:
         if saved_session:
             await client.start()
-            print("✅ Logged in from saved session!")
+            logger.info("✅ Logged in from saved session!")
         else:
             await client.start(phone=phone, code_callback=lambda: code)
-            print("✅ Logged in with new session!")
+            logger.info("✅ Logged in with new session!")
             
             # ذخیره سشن
             session_string = client.session.save()
             await save_session_to_worker(session_string)
     except Exception as e:
-        print(f"❌ Login failed: {e}")
+        logger.error(f"❌ Login failed: {e}")
         return
     
     # 4. اطلاعات کاربر
     me = await client.get_me()
-    print(f"👤 Logged in as: {me.first_name} (@{me.username})")
+    logger.info(f"👤 Logged in as: {me.first_name} (@{me.username})")
     
     # 5. تعریف هندلرها
     @client.on(events.NewMessage(pattern='/start', outgoing=True))
@@ -334,9 +353,9 @@ async def main():
             try:
                 if target_chat:
                     await client.send_message(target_chat, message_text)
-                    print(f'✅ Message sent to {target_chat.title}')
+                    logger.info(f'✅ Message sent to {target_chat.title}')
             except Exception as e:
-                print(f'❌ Error: {e}')
+                logger.error(f'❌ Error sending message: {e}')
             
             if interval >= 1:
                 for _ in range(int(interval)):
@@ -347,23 +366,24 @@ async def main():
                 await asyncio.sleep(interval)
     
     # 6. اجرا
-    print("📝 Bot is running... Check Saved Messages")
+    logger.info("📝 Bot is running... Check Saved Messages")
     await client.run_until_disconnected()
 
 # ============================================
 # 📌 اجرای همزمان وب سرور و ربات
 # ============================================
 async def main_with_server():
+    logger.info("🔥 Starting main function...")
     await asyncio.gather(
         run_web_server(),
         main()
     )
 
 if __name__ == '__main__':
-    print("🔥 Starting main function...")
     try:
         asyncio.run(main_with_server())
     except KeyboardInterrupt:
-        print("👋 Goodbye!")
+        logger.info("👋 Goodbye!")
     except Exception as e:
-        print(f"❌ Fatal Error: {e}")
+        logger.error(f"❌ Fatal Error: {e}")
+        sys.exit(1)
