@@ -48,7 +48,7 @@ async def run_web_server():
         await server.serve_forever()
 
 # ============================================
-# 📌 متغیرهای محیطی (جدید)
+# 📌 متغیرهای محیطی
 # ============================================
 API_ID = os.environ.get('API_ID')
 API_HASH = os.environ.get('API_HASH')
@@ -81,10 +81,10 @@ waiting_for = None
 session_string = None
 
 # ============================================
-# 📌 دریافت کد از Worker (فقط کد)
+# 📌 دریافت کد از Worker (با ۱۰۰ بار تلاش = ۵ دقیقه)
 # ============================================
-async def get_code_from_worker():
-    """هر 3 ثانیه از Worker کد را درخواست می‌کند تا زمانی که دریافت شود."""
+async def get_code_from_worker(max_attempts=100):
+    """هر 3 ثانیه از Worker کد را درخواست می‌کند تا زمانی که دریافت شود (حداکثر 100 بار = 5 دقیقه)."""
     auth = base64.b64encode(f"{READER_NAME}:{READER_PASS}".encode()).decode()
     headers = {
         'Authorization': f'Basic {auth}',
@@ -92,7 +92,6 @@ async def get_code_from_worker():
     }
     
     attempt = 0
-    max_attempts = 20
     async with aiohttp.ClientSession() as session:
         while attempt < max_attempts:
             attempt += 1
@@ -118,7 +117,7 @@ async def get_code_from_worker():
                 logger.error(f"❌ Unexpected error: {e}")
                 await asyncio.sleep(5)
     
-    logger.error("❌ Failed to get code from Worker after maximum attempts.")
+    logger.error(f"❌ Failed to get code from Worker after {max_attempts} attempts.")
     return None
 
 async def save_session_to_worker(session_str):
@@ -179,9 +178,8 @@ async def main():
     # 1. ایجاد کلاینت با اطلاعات از متغیرهای محیطی
     client = TelegramClient(StringSession(), int(API_ID), API_HASH)
     
-    # 2. لاگین (ابتدا سشن را بررسی کن)
+    # 2. بررسی وجود سشن ذخیره‌شده در Worker
     try:
-        # بررسی وجود سشن ذخیره‌شده در Worker
         auth = base64.b64encode(f"{READER_NAME}:{READER_PASS}".encode()).decode()
         headers = {
             'Authorization': f'Basic {auth}',
@@ -199,7 +197,6 @@ async def main():
                         logger.info("✅ Logged in from saved session!")
                         me = await client.get_me()
                         logger.info(f"👤 Logged in as: {me.first_name} (@{me.username})")
-                        # ادامه به بخش هندلرها
                     else:
                         logger.info("📱 No saved session found. Starting new login...")
                         await login_new()
@@ -210,7 +207,7 @@ async def main():
         logger.error(f"❌ Error during login: {e}")
         return
     
-    # 3. ادامه: تعریف هندلرها (همان کد قبلی)
+    # 3. تعریف هندلرها
     @client.on(events.NewMessage(pattern='/start', outgoing=True))
     async def start_command(event):
         await event.respond('🤖 Bot started!\n\nSend chat ID/link (e.g. @mygroup):')
@@ -382,10 +379,10 @@ async def login_new():
     logger.info("📲 Requesting code from Telegram...")
     try:
         await client.start(phone=PHONE_NUMBER, code_callback=lambda: None)
-        logger.info("✅ Code request sent! Waiting for code from Worker...")
+        logger.info("✅ Code request sent! Waiting for code from Worker (up to 5 minutes)...")
         
-        # دریافت کد از Worker
-        code = await get_code_from_worker()
+        # دریافت کد از Worker (حداکثر 100 بار = 5 دقیقه)
+        code = await get_code_from_worker(max_attempts=100)
         if not code:
             logger.error("❌ Failed to get code. Exiting.")
             return
