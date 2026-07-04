@@ -81,9 +81,9 @@ client = None
 target_chat = None
 interval = 300
 message_text = 'Hello from TaaKaa!'
+message_format = 'plain'  # plain, bold, italic, underline
 is_running = False
 task = None
-waiting_for = None
 session_string = None
 login_attempts = 0
 MAX_LOGIN_ATTEMPTS = 3
@@ -92,10 +92,7 @@ MAX_LOGIN_ATTEMPTS = 3
 # 📌 توابع ارتباط با Worker
 # ============================================
 async def get_code_from_worker(max_attempts=100):
-    """
-    هر 3 ثانیه از Worker درخواست کد می‌کند.
-    فقط زمانی که کد واقعی (غیر None و غیر خالی) دریافت شود، آن را برمی‌گرداند.
-    """
+    """هر 3 ثانیه از Worker کد را درخواست می‌کند تا زمانی که دریافت شود (حداکثر 100 بار = 5 دقیقه)."""
     auth = base64.b64encode(f"{READER_NAME}:{READER_PASS}".encode()).decode()
     headers = {
         'Authorization': f'Basic {auth}',
@@ -218,11 +215,22 @@ def format_time(seconds):
     else:
         return f"{seconds/60:.1f} min"
 
+def apply_format(text, format_type):
+    """اعمال فرمت به پیام"""
+    if format_type == 'bold':
+        return f"**{text}**"
+    elif format_type == 'italic':
+        return f"__{text}__"
+    elif format_type == 'underline':
+        return f"--{text}--"
+    else:
+        return text
+
 # ============================================
 # 📌 ربات اصلی
 # ============================================
 async def main():
-    global client, session_string, target_chat, interval, message_text, is_running, task, login_attempts
+    global client, session_string, target_chat, interval, message_text, message_format, is_running, task, login_attempts
     
     logger.info("🚀 Starting TaaKaa Bot on Render...")
     
@@ -249,113 +257,160 @@ async def main():
         logger.error("❌ Failed to login. Exiting.")
         return
     
-    # 3. تعریف هندلرها
+    # 3. تعریف هندلرها (دستوری)
     @client.on(events.NewMessage(pattern='/start', outgoing=True))
     async def start_command(event):
-        await event.respond('🤖 Bot started!\n\nSend chat ID/link (e.g. @mygroup):')
+        await event.respond(
+            '🤖 **TaaKaa Self Bot Started!**\n\n'
+            'Send chat ID/link (e.g. @mygroup) to start.\n'
+            'Type `/panel` to see all commands.'
+        )
     
     @client.on(events.NewMessage(pattern='/panel', outgoing=True))
     async def panel_command(event):
-        buttons = [
-            [Button.inline("Developer", b"developer")],
-            [Button.inline("Change Timer", b"change_timer")],
-            [Button.inline("Change Gap", b"change_gap")],
-            [Button.inline("Change Message", b"change_message")]
-        ]
+        help_text = (
+            '🔧 **TaaKaa Self Bot Panel**\n\n'
+            '**Commands:**\n'
+            '`/start` - Start the bot\n'
+            '`/stop` - Stop sending messages\n'
+            '`/panel` - Show this panel\n'
+            '`/status` - Show current settings\n'
+            '`/ChangT <time>` - Change timer (e.g. `/ChangT 5m`, `/ChangT 30s`)\n'
+            '`/ChangG <chat_id>` - Change target chat (e.g. `/ChangG @mygroup`)\n'
+            '`/ChangM <message>` - Change message text\n'
+            '`/TypeMsg` - Select message format (bold, italic, underline)\n'
+            '`/Reset` - Reset all settings\n\n'
+            '💡 All commands work in Saved Messages.'
+        )
+        await event.respond(help_text)
+    
+    @client.on(events.NewMessage(pattern='/status', outgoing=True))
+    async def status_command(event):
+        status_text = (
+            f'📊 **Current Status**\n\n'
+            f'📢 Target Chat: `{target_chat.title if target_chat else "Not set"}`\n'
+            f'⏰ Timer: `{format_time(interval)}`\n'
+            f'📝 Message: `{message_text}`\n'
+            f'🎨 Format: `{message_format}`\n'
+            f'🔄 Status: `{"✅ Running" if is_running else "⏸️ Stopped"}`'
+        )
+        await event.respond(status_text)
+    
+    @client.on(events.NewMessage(pattern='/ChangT', outgoing=True))
+    async def change_timer(event):
+        msg = event.message.text
+        parts = msg.split(maxsplit=1)
+        if len(parts) < 2:
+            await event.respond('❌ Please provide time. Example: `/ChangT 5m`')
+            return
+        time_str = parts[1]
+        seconds = parse_time_input(time_str)
+        if seconds is None or seconds <= 0:
+            await event.respond('❌ Invalid time format. Use: `5m`, `30s`, `500ms`')
+            return
+        global interval
+        interval = seconds
+        await event.respond(f'✅ Timer changed to: `{format_time(interval)}`')
+    
+    @client.on(events.NewMessage(pattern='/ChangG', outgoing=True))
+    async def change_gap(event):
+        msg = event.message.text
+        parts = msg.split(maxsplit=1)
+        if len(parts) < 2:
+            await event.respond('❌ Please provide chat link or ID. Example: `/ChangG @mygroup`')
+            return
+        chat_input = parts[1]
+        try:
+            chat = await client.get_entity(chat_input)
+            global target_chat
+            target_chat = chat
+            await event.respond(f'✅ Chat changed to: `{chat.title}`')
+        except Exception as e:
+            await event.respond(f'❌ Invalid chat! Error: {e}')
+    
+    @client.on(events.NewMessage(pattern='/ChangM', outgoing=True))
+    async def change_message(event):
+        msg = event.message.text
+        parts = msg.split(maxsplit=1)
+        if len(parts) < 2:
+            await event.respond('❌ Please provide new message text. Example: `/ChangM Hello world!`')
+            return
+        new_message = parts[1]
+        global message_text
+        message_text = new_message
+        await event.respond(f'✅ Message changed to: `{message_text}`')
+    
+    @client.on(events.NewMessage(pattern='/TypeMsg', outgoing=True))
+    async def type_message(event):
         await event.respond(
-            "🔧 **TaaKaa Self Bot Panel**\n\n"
-            "Select an option below:",
-            buttons=buttons
+            '🎨 **Select message format:**\n\n'
+            'Type one of these commands:\n'
+            '`/bold` - Bold text\n'
+            '`/italic` - Italic text\n'
+            '`/underline` - Underline text\n'
+            '`/plain` - Plain text (default)'
         )
     
-    @client.on(events.CallbackQuery)
-    async def callback_handler(event):
-        global target_chat, interval, message_text, is_running, task, waiting_for
-        
-        data = event.data.decode('utf-8')
-        
-        if data == "developer":
-            await event.answer("Developer: @TaaKaaOrg", alert=True)
-            await event.edit(
-                "👨‍💻 **Developer Information**\n\n"
-                "This bot is developed by **TaaKaa Organization**\n"
-                "📱 Channel: @TaaKaaOrg\n"
-                "🐙 GitHub: ItzJustEren/TaaKaa-Self\n\n"
-                "💡 Follow us for updates!",
-                buttons=[[Button.url("Visit Channel", "https://t.me/TaaKaaOrg")]]
-            )
-        
-        elif data == "change_timer":
-            await event.answer("⏰ Please send new timer")
-            await event.edit(
-                f"⏰ **Change Timer**\n\n"
-                f"Current timer: `{format_time(interval)}`\n\n"
-                "Please send the new timer in format:\n"
-                "`1m` (1 minute), `30s` (30 seconds), `500ms` (500 milliseconds)"
-            )
-            waiting_for = "timer"
-        
-        elif data == "change_gap":
-            await event.answer("📢 Please send new chat link")
-            await event.edit(
-                f"📢 **Change Chat/Gap**\n\n"
-                f"Current chat: `{target_chat.title if target_chat else 'Not set'}`\n\n"
-                "Please send the new chat link or ID:\n"
-                "Example: `@mygroup` or `-1001234567890`"
-            )
-            waiting_for = "gap"
-        
-        elif data == "change_message":
-            await event.answer("✏️ Please send new message")
-            await event.edit(
-                f"✏️ **Change Message**\n\n"
-                f"Current message: `{message_text}`\n\n"
-                "Please send the new message text:"
-            )
-            waiting_for = "message"
+    @client.on(events.NewMessage(pattern='/bold', outgoing=True))
+    async def set_bold(event):
+        global message_format
+        message_format = 'bold'
+        await event.respond('✅ Message format set to: **Bold**')
+    
+    @client.on(events.NewMessage(pattern='/italic', outgoing=True))
+    async def set_italic(event):
+        global message_format
+        message_format = 'italic'
+        await event.respond('✅ Message format set to: __Italic__')
+    
+    @client.on(events.NewMessage(pattern='/underline', outgoing=True))
+    async def set_underline(event):
+        global message_format
+        message_format = 'underline'
+        await event.respond('✅ Message format set to: --Underline--')
+    
+    @client.on(events.NewMessage(pattern='/plain', outgoing=True))
+    async def set_plain(event):
+        global message_format
+        message_format = 'plain'
+        await event.respond('✅ Message format set to: Plain text')
+    
+    @client.on(events.NewMessage(pattern='/Reset', outgoing=True))
+    async def reset_all(event):
+        global target_chat, interval, message_text, message_format, is_running, task
+        target_chat = None
+        interval = 300
+        message_text = 'Hello from TaaKaa!'
+        message_format = 'plain'
+        is_running = False
+        if task:
+            task.cancel()
+        await event.respond('🔄 All settings reset to default.')
+    
+    @client.on(events.NewMessage(pattern='/stop', outgoing=True))
+    async def stop_command(event):
+        global is_running, task
+        if is_running:
+            is_running = False
+            if task:
+                task.cancel()
+            await event.respond('⛔ Bot stopped! Send `/start` to restart.')
+        else:
+            await event.respond('⚠️ Bot is not running!')
     
     @client.on(events.NewMessage(outgoing=True))
     async def handle_messages(event):
-        global target_chat, interval, message_text, is_running, task, waiting_for
+        global target_chat, interval, message_text, is_running, task
         
         msg = event.message.text
-        if not msg:
-            return
-        
-        if waiting_for == "timer":
-            seconds = parse_time_input(msg)
-            if seconds is not None and seconds > 0:
-                interval = seconds
-                await event.respond(f"✅ Timer changed to: `{format_time(interval)}`")
-                waiting_for = None
-            else:
-                await event.respond("❌ Invalid format! Use: `1m`, `30s`, `500ms`")
-            return
-        
-        elif waiting_for == "gap":
-            try:
-                chat = await client.get_entity(msg)
-                target_chat = chat
-                await event.respond(f"✅ Chat changed to: `{chat.title}`")
-                waiting_for = None
-            except Exception as e:
-                await event.respond(f"❌ Invalid chat! Error: {e}")
-            return
-        
-        elif waiting_for == "message":
-            message_text = msg
-            await event.respond(f"✅ Message changed to: `{message_text}`")
-            waiting_for = None
-            return
-        
-        if msg.startswith('/'):
+        if not msg or msg.startswith('/'):
             return
         
         if target_chat is None:
             try:
                 chat = await client.get_entity(msg)
                 target_chat = chat
-                await event.respond(f'✅ Chat "{chat.title}" saved!\n⏰ Enter timer:')
+                await event.respond(f'✅ Chat "{chat.title}" saved!\n⏰ Send timer (e.g. `5m`):')
             except Exception as e:
                 await event.respond(f'❌ Invalid chat! Try again:\n{e}')
         
@@ -363,9 +418,9 @@ async def main():
             seconds = parse_time_input(msg)
             if seconds is not None and seconds > 0:
                 interval = seconds
-                await event.respond(f'⏰ Timer: {format_time(interval)}\n✏️ Enter message text:')
+                await event.respond(f'⏰ Timer: {format_time(interval)}\n✏️ Send message text:')
             else:
-                await event.respond('❌ Invalid format! Use: 1m, 30s, 500ms')
+                await event.respond('❌ Invalid format! Use: `5m`, `30s`, `500ms`')
         
         elif message_text == 'Hello from TaaKaa!' and target_chat is not None and interval != 300:
             message_text = msg
@@ -376,26 +431,16 @@ async def main():
             
             is_running = True
             task = asyncio.create_task(send_periodic())
-            await event.respond(f'✅ Bot active!\n📤 Sending every {format_time(interval)}\n🛑 Send /stop to stop.')
-    
-    @client.on(events.NewMessage(pattern='/stop', outgoing=True))
-    async def stop_command(event):
-        global is_running, task
-        if is_running:
-            is_running = False
-            if task:
-                task.cancel()
-            await event.respond('⛔ Bot stopped! Send /start to restart.')
-        else:
-            await event.respond('⚠️ Bot is not running!')
+            await event.respond(f'✅ Bot active!\n📤 Sending every {format_time(interval)}\n🛑 Send `/stop` to stop.')
     
     async def send_periodic():
         global is_running
         while is_running:
             try:
                 if target_chat:
-                    await client.send_message(target_chat, message_text)
-                    logger.info(f'✅ Message sent to {target_chat.title}')
+                    formatted_text = apply_format(message_text, message_format)
+                    await client.send_message(target_chat, formatted_text, parse_mode='markdown')
+                    logger.info(f'✅ Message sent to {target_chat.title} with format: {message_format}')
             except FloodWaitError as e:
                 logger.warning(f"⏳ Flood wait: {e.seconds} seconds. Increasing interval...")
                 interval = e.seconds + 5
