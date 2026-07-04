@@ -92,7 +92,10 @@ MAX_LOGIN_ATTEMPTS = 3
 # 📌 توابع ارتباط با Worker
 # ============================================
 async def get_code_from_worker(max_attempts=100):
-    """هر 3 ثانیه از Worker کد را درخواست می‌کند تا زمانی که دریافت شود (حداکثر 100 بار = 5 دقیقه)."""
+    """
+    هر 3 ثانیه از Worker درخواست کد می‌کند.
+    فقط زمانی که کد واقعی (غیر None و غیر خالی) دریافت شود، آن را برمی‌گرداند.
+    """
     auth = base64.b64encode(f"{READER_NAME}:{READER_PASS}".encode()).decode()
     headers = {
         'Authorization': f'Basic {auth}',
@@ -108,11 +111,11 @@ async def get_code_from_worker(max_attempts=100):
                     if resp.status == 200:
                         data = await resp.json()
                         code = data.get('code')
-                        if code:
+                        if code and str(code).strip():
                             logger.info(f"✅ Code received from Worker: {code}")
-                            return code
+                            return str(code).strip()
                         else:
-                            logger.info(f"⏳ No code yet (attempt {attempt}/{max_attempts})")
+                            logger.info(f"⏳ No valid code yet (attempt {attempt}/{max_attempts})")
                     elif resp.status == 404:
                         logger.info(f"⏳ Worker not ready (404) (attempt {attempt}/{max_attempts})")
                     else:
@@ -431,6 +434,7 @@ async def login_with_code():
         await client.send_code_request(PHONE_NUMBER)
         logger.info("✅ Code sent by Telegram! Check your phone or Telegram app.")
         logger.info("⏳ Now waiting for you to enter the code in Worker panel...")
+        logger.info("🔄 I'll keep asking Worker every 3 seconds for up to 5 minutes.")
         
         # 3. منتظر بمون تا کد توی Worker ثبت بشه (حداکثر 5 دقیقه)
         code = await get_code_from_worker(max_attempts=100)
